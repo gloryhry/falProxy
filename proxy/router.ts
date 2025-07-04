@@ -1,348 +1,258 @@
-// main.ts
-import { Status } from "https://deno.land/std@0.208.0/http/status.ts"; // For HTTP status codes
+// router.ts
+import { Status } from "https://deno.land/std@0.208.0/http/status.ts";
+import { load } from "https://deno.land/std@0.208.0/dotenv/mod.ts";
 
 // --- Configuration Loading ---
-const AI_KEYS_RAW = Deno.env.get("AI_KEYS");
+await load({ export: true });
+
 const CUSTOM_ACCESS_KEY = Deno.env.get("CUSTOM_ACCESS_KEY");
+const AI_KEYS_RAW = Deno.env.get("AI_KEYS");
 const PORT = parseInt(Deno.env.get("PORT") || "8000");
+const DEBUG_MODE = Deno.env.get("DEBUG_MODE")?.toLowerCase() === 'true';
 
-if (!AI_KEYS_RAW) {
-  console.error("FATAL: AI_KEYS environment variable is not set. Please set it as a comma-separated string of keys.");
-  Deno.exit(1);
+const SUPPORTED_MODELS_RAW = Deno.env.get("SUPPORTED_MODELS");
+const SUPPORTED_MODELS_MAP = new Map<string, string>();
+
+if (SUPPORTED_MODELS_RAW) {
+    SUPPORTED_MODELS_RAW.split(',')
+      .map(pair => pair.trim())
+      .filter(pair => pair.includes(':'))
+      .forEach(pair => {
+          const [key, ...valueParts] = pair.split(':');
+          const value = valueParts.join(':');
+          if (key && value) {
+              SUPPORTED_MODELS_MAP.set(key.trim(), value.trim());
+          }
+      });
 }
+
+function debugLog(...args: any[]) { if (DEBUG_MODE) console.log("[DEBUG]", ...args); }
+console.log(`Debug mode is ${DEBUG_MODE ? 'ENABLED' : 'DISABLED'}.`);
+
+// --- Environment Variable Validation ---
+if (!CUSTOM_ACCESS_KEY) { console.error("FATAL: CUSTOM_ACCESS_KEY is not set."); Deno.exit(1); }
+if (!AI_KEYS_RAW) { console.error("FATAL: AI_KEYS environment variable is not set."); Deno.exit(1); }
 const AI_KEYS = AI_KEYS_RAW.split(',').map(key => key.trim()).filter(key => key.length > 0);
-if (AI_KEYS.length === 0) {
-    console.error("FATAL: AI_KEYS environment variable is set but contains no valid keys after parsing.");
-    Deno.exit(1);
-}
+if (AI_KEYS.length === 0) { console.error("FATAL: AI_KEYS contains no valid keys."); Deno.exit(1); }
+if (SUPPORTED_MODELS_MAP.size === 0) { console.error("FATAL: SUPPORTED_MODELS in .env is not set or is invalid."); Deno.exit(1); }
+console.log(`Loaded ${SUPPORTED_MODELS_MAP.size} supported models from .env`);
 
-if (!CUSTOM_ACCESS_KEY) {
-  console.error("FATAL: CUSTOM_ACCESS_KEY environment variable is not set.");
-  Deno.exit(1);
-}
 
-// Model URLs configuration - Ensure these are correct for your Fal.ai models
-// Added 'uses_image_size_object' flag
-const MODEL_URLS: Record<string, {
+// --- Dynamic Model Configuration & Caching ---
+// MODIFIED: ModelConfig is simpler now, no need for status_base_url
+interface ModelConfig {
     submit_url: string;
-    status_base_url: string;
-    default_size?: string;
-    supports_size_param?: boolean;         // Accepts top-level width/height?
-    supports_aspect_ratio_param?: boolean; // Accepts top-level aspect_ratio string?
-    uses_image_size_object?: boolean;      // Requires/accepts nested image_size: { w, h } object?
-}> = {
-  "flux-1.1-pro-ultra": {
-    "submit_url": "https://queue.fal.run/fal-ai/flux-pro/v1.1-ultra",
-    "status_base_url": "https://queue.fal.run/fal-ai/flux-pro",
-    "default_size": "1024x1024",
-    "supports_size_param": true,
-    "supports_aspect_ratio_param": true,
-    "uses_image_size_object": true
-  },
-  "flux-1.1-pro": {
-    "submit_url": "https://queue.fal.run/fal-ai/flux-pro/v1.1",
-    "status_base_url": "https://queue.fal.run/fal-ai/flux-pro",
-    "default_size": "1024x1024",
-    "supports_size_param": true,
-    "supports_aspect_ratio_param": true,
-    "uses_image_size_object": true     
-  },
-  "flux-schnell": {
-    "submit_url": "https://queue.fal.run/fal-ai/flux-schnell/submit", 
-    "status_base_url": "https://queue.fal.run/fal-ai/flux-schnell",   
-    "default_size": "1024x1024",
-    "supports_size_param": true,
-    "supports_aspect_ratio_param": true,
-    "uses_image_size_object": true
-  },
-   "flux-dev": {
-    "submit_url": "https://queue.fal.run/fal-ai/flux/dev",
-    "status_base_url": "https://queue.fal.run/fal-ai/flux",
-    "default_size": "1024x1024",
-    "supports_size_param": true,
-    "supports_aspect_ratio_param": true,
-    "uses_image_size_object": true
-  },
-   "ideogram-v2a-turbo": {
-    "submit_url": "https://queue.fal.run/fal-ai/ideogram/v2",
-    "status_base_url": "https://queue.fal.run/fal-ai/ideogram",
-    "default_size": "1024x1024",
-    "supports_size_param": false,
-    "supports_aspect_ratio_param": true,
-    "uses_image_size_object": false
-  },
-  "imagen-3": {
-    "submit_url": "https://queue.fal.run/fal-ai/google-imagen-3/submit",
-    "status_base_url": "https://queue.fal.run/fal-ai/google-imagen-3",
-    "default_size": "1024x1024",
-    "supports_size_param": false,
-    "supports_aspect_ratio_param": true, 
-    "uses_image_size_object": false
+    supports_size_param: boolean;
+    supports_aspect_ratio_param: boolean;
+    uses_image_size_object: boolean;
+}
+interface CachedModelConfig extends ModelConfig { fetchedAt: number; }
+const modelConfigCache = new Map<string, CachedModelConfig>();
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
-  },
-  "imagen-4": {
-    "submit_url": "https://queue.fal.run/fal-ai/imagen4/preview/submit",
-    "status_base_url": "https://queue.fal.run/fal-ai/imagen4/preview",
-    "default_size": "1024x1024",
-    "supports_size_param": false, 
-    "supports_aspect_ratio_param": true,
-    "uses_image_size_object": false
-  },
-  "luma-photon": {
-    "submit_url": "https://queue.fal.run/fal-ai/luma-photon/submit",
-    "status_base_url": "https://queue.fal.run/fal-ai/luma-photon",
-    "default_size": "1024x1024",
-    "supports_size_param": true,
-    "supports_aspect_ratio_param": false,
-    "uses_image_size_object": false
-  }
-};
-
-// --- Helper Functions (gcd, calculateAspectRatio, parseSize, getRandomApiKey, extractAndValidateApiKey - unchanged) ---
-function getRandomApiKey(): string {
-  const randomIndex = Math.floor(Math.random() * AI_KEYS.length);
-  return AI_KEYS[randomIndex];
+async function fetchAndParseModelSchema(endpointId: string): Promise<ModelConfig> {
+    const openApiUrl = `https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=${endpointId}`;
+    debugLog(`[Schema Fetch] Fetching for ${endpointId}`);
+    const response = await fetch(openApiUrl);
+    if (!response.ok) throw new Error(`Failed to fetch OpenAPI schema for ${endpointId}: ${response.status} ${response.statusText}`);
+    
+    // (Schema parsing logic is largely the same, but simpler)
+    const schema = await response.json();
+    const postPathKey = `/${endpointId}`;
+    const postPath = schema.paths?.[postPathKey]?.post;
+    if (!postPath) throw new Error(`Could not find POST path '${postPathKey}' in schema.`);
+    const requestBodyRef = postPath.requestBody?.content?.['application/json']?.schema?.$ref;
+    if (!requestBodyRef) throw new Error(`Could not find request body reference in schema.`);
+    const inputSchemaName = requestBodyRef.split('/').pop();
+    if (!inputSchemaName) throw new Error(`Could not extract schema name from ref '${requestBodyRef}'.`);
+    const inputSchema = schema.components?.schemas?.[inputSchemaName];
+    if (!inputSchema) throw new Error(`Could not find input schema definition '${inputSchemaName}'.`);
+    const properties = inputSchema.properties;
+    if (!properties) throw new Error(`Input schema '${inputSchemaName}' has no properties.`);
+    const supports_size_param = 'width' in properties && 'height' in properties && properties.width.type === 'integer';
+    const supports_aspect_ratio_param = 'aspect_ratio' in properties;
+    let uses_image_size_object = false;
+    const imageSizeProp = properties.image_size;
+    if (imageSizeProp) {
+        const isSizeObjectSchema = (propDef: any): boolean => {
+            if (!propDef) return false;
+            if (propDef.type === 'object' && propDef.properties?.width && propDef.properties?.height) return true;
+            if (propDef.$ref) {
+                const refName = propDef.$ref.split('/').pop();
+                const refSchema = schema.components?.schemas?.[refName];
+                return refSchema?.type === 'object' && refSchema.properties?.width && refSchema.properties?.height;
+            }
+            return false;
+        };
+        if (isSizeObjectSchema(imageSizeProp)) { uses_image_size_object = true; }
+        else if (imageSizeProp.anyOf || imageSizeProp.oneOf) { uses_image_size_object = (imageSizeProp.anyOf || imageSizeProp.oneOf).some((option: any) => isSizeObjectSchema(option)); }
+    }
+    
+    const config: ModelConfig = {
+        submit_url: `https://queue.fal.run/${endpointId}`,
+        supports_size_param,
+        supports_aspect_ratio_param,
+        uses_image_size_object,
+    };
+    debugLog(`[Schema Parse] Successfully parsed config for ${endpointId}:`, config);
+    return config;
 }
 
+async function getModelConfig(modelName: string): Promise<ModelConfig | null> {
+    const endpointId = SUPPORTED_MODELS_MAP.get(modelName);
+    if (!endpointId) return null;
+    const cached = modelConfigCache.get(modelName);
+    if (cached && (Date.now() - cached.fetchedAt < CACHE_TTL_MS)) {
+        debugLog(`[Cache HIT] Using cached config for ${modelName}`);
+        return cached;
+    }
+    debugLog(`[Cache MISS] Fetching new config for ${modelName}`);
+    try {
+        const newConfig = await fetchAndParseModelSchema(endpointId);
+        modelConfigCache.set(modelName, { ...newConfig, fetchedAt: Date.now() });
+        return newConfig;
+    } catch (error) {
+        console.error(`[Config Error] Failed to get model config for '${modelName}':`, error);
+        if (cached) {
+            console.warn(`[Config Warning] Serving stale cache for ${modelName} due to fetch failure.`);
+            return cached;
+        }
+        return null;
+    }
+}
+
+// --- Helper Functions ---
+function getRandomApiKey(): string { const randomIndex = Math.floor(Math.random() * AI_KEYS.length); return AI_KEYS[randomIndex]; }
 interface AuthResult { valid: boolean; userKey?: string; apiKey?: string; error?: string; }
+function extractAndValidateApiKey(request: Request): AuthResult { const authHeader = request.headers.get('Authorization') || ''; let userKey: string | undefined; if (authHeader.startsWith('Bearer ')) userKey = authHeader.substring(7); else if (authHeader.startsWith('Key ')) userKey = authHeader.substring(4); else userKey = authHeader; if (!userKey) return { valid: false, userKey, error: "Authorization header missing or empty." }; if (userKey !== CUSTOM_ACCESS_KEY) { console.log(`Authentication failed: Invalid user key provided.`); return { valid: false, userKey: "provided_but_invalid", error: "Invalid API key." }; } const randomApiKey = getRandomApiKey(); return { valid: true, userKey, apiKey: randomApiKey }; }
+function parseSize(sizeString?: string): { width: number; height: number } | null { if (!sizeString || typeof sizeString !== 'string') return null; const parts = sizeString.toLowerCase().split('x'); if (parts.length === 2) { const width = parseInt(parts[0], 10); const height = parseInt(parts[1], 10); if (!isNaN(width) && !isNaN(height) && width > 0 && height > 0) return { width, height }; } return null; }
+function gcd(a: number, b: number): number { while (b) { [a, b] = [b, a % b]; } return a; }
+function calculateAspectRatio(width: number, height: number): string { if (!width || !height || width <= 0 || height <= 0) return "1:1"; const divisor = gcd(width, height); return `${width / divisor}:${height / divisor}`; }
 
-function extractAndValidateApiKey(request: Request): AuthResult {
-  const authHeader = request.headers.get('Authorization') || '';
-  let userKey: string | undefined;
-  if (authHeader.startsWith('Bearer ')) userKey = authHeader.substring(7);
-  else if (authHeader.startsWith('Key ')) userKey = authHeader.substring(4);
-  else userKey = authHeader;
-  if (!userKey) return { valid: false, userKey, error: "Authorization header missing or empty." };
-  if (userKey !== CUSTOM_ACCESS_KEY) {
-    console.log(`Authentication failed: Invalid user key provided.`);
-    return { valid: false, userKey: "provided_but_invalid", error: "Invalid API key." };
-  }
-  try {
-    const randomApiKey = getRandomApiKey();
-    console.log(`Selected random Fal API key for request.`);
-    return { valid: true, userKey, apiKey: randomApiKey };
-  } catch (e: any) { return { valid: false, userKey, error: e.message }; }
-}
-
-function parseSize(sizeString?: string): { width: number; height: number } | null {
-  if (!sizeString || typeof sizeString !== 'string') return null;
-  const parts = sizeString.toLowerCase().split('x');
-  if (parts.length === 2) {
-    const width = parseInt(parts[0], 10); const height = parseInt(parts[1], 10);
-    if (!isNaN(width) && !isNaN(height) && width > 0 && height > 0) return { width, height };
-  } return null;
-}
-
-function gcd(a: number, b: number): number { while (b) { a %= b; [a, b] = [b, a]; } return a; }
-
-function calculateAspectRatio(width: number, height: number): string {
-  if (!width || !height || width <= 0 || height <= 0) {
-    console.warn(`Invalid dimensions for aspect ratio calculation: ${width}x${height}. Defaulting to 1:1.`);
-    return "1:1";
-  }
-  const divisor = gcd(width, height);
-  return `${width / divisor}:${height / divisor}`;
-}
-
+// --- CORS Configuration ---
+const CORS_HEADERS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, Authorization', };
 
 // --- Endpoint Handlers ---
 async function handleImageGenerations(request: Request): Promise<Response> {
-  const authResult = extractAndValidateApiKey(request);
-  if (!authResult.valid || !authResult.apiKey) {
-    const message = authResult.error || "Authentication failed.";
-    console.log(`Authentication attempt failed. Reason: ${message}`);
-    return new Response(JSON.stringify({ error: { message: message, type: "authentication_error" } }), { status: Status.Unauthorized, headers: { 'Content-Type': 'application/json' } });
-  }
-  const { apiKey } = authResult;
-
-  let openaiRequestPayload;
-  try { openaiRequestPayload = await request.json(); } catch (error) {
-    return new Response(JSON.stringify({ error: { message: "Missing or invalid JSON request body.", type: "invalid_request_error" } }), { status: Status.BadRequest, headers: { 'Content-Type': 'application/json' } });
-  }
-
-  const { prompt, model: requestedModel, n: requestedN, size: requestedSize, seed: requestedSeed } = openaiRequestPayload;
-  const modelName = requestedModel || "flux-dev";
-  const numImages = Math.max(1, Math.min(4, parseInt(requestedN) || 1));
-  const seed = requestedSeed !== undefined && Number.isInteger(Number(requestedSeed)) ? Number(requestedSeed) : 42;
-
-  if (!prompt || typeof prompt !== 'string' || prompt.trim() === "") {
-    return new Response(JSON.stringify({ error: { message: "A 'prompt' is required.", type: "invalid_request_error" } }), { status: Status.BadRequest, headers: { 'Content-Type': 'application/json' } });
-  }
-
-  const modelConfig = MODEL_URLS[modelName];
-  if (!modelConfig) {
-    return new Response(JSON.stringify({ error: { message: `Model '${modelName}' not found or configured.`, type: "invalid_request_error" } }), { status: Status.BadRequest, headers: { 'Content-Type': 'application/json' } });
-  }
-
-  // --- Determine dimensions and aspect ratio ---
-  let width: number | undefined;
-  let height: number | undefined;
-  let aspectRatio: string | undefined;
-
-  const requestedDimensions = parseSize(requestedSize);
-  const defaultDimensions = parseSize(modelConfig.default_size);
-
-  if (requestedDimensions) {
-    width = requestedDimensions.width; height = requestedDimensions.height;
-  } else if (defaultDimensions) {
-    width = defaultDimensions.width; height = defaultDimensions.height;
-    if(requestedSize) console.log(`Warning: Invalid 'size' format: ${requestedSize}. Using model default size: ${modelConfig.default_size}`);
-  } else if(requestedSize) {
-    console.log(`Warning: Invalid 'size' format: ${requestedSize}. No default size for model. Size/Aspect Ratio might be omitted or default to Fal model's internal default.`);
-  }
-
-  // Calculate aspect ratio only if dimensions are valid
-  if (width && height) {
-      aspectRatio = calculateAspectRatio(width, height);
-      console.log(`Determined dimensions: ${width}x${height}, Aspect Ratio: ${aspectRatio}`);
-  } else {
-      console.log(`Could not determine valid dimensions from size '${requestedSize}' or model default.`);
-  }
-
-  // --- Construct Fal Payload ---
-  const falRequestPayload: Record<string, any> = {
-    prompt: prompt,
-    num_images: numImages,
-    seed: seed,
-    enable_safety_checker: false // Consistently add this as requested
-  };
-
-  // --- Add size/aspect parameters based on determined dimensions and model config ---
-  if (width && height) { // Only add size/aspect if dimensions were determined
-      if (modelConfig.uses_image_size_object) {
-          falRequestPayload.image_size = { width: width, height: height };
-          console.log(`Adding nested 'image_size: { width: ${width}, height: ${height} }' to Fal payload.`);
-          // If image_size object is used, we might not need top-level width/height even if supported
-      } else if (modelConfig.supports_size_param) {
-          // Add top-level width/height only if image_size object is NOT used
-          falRequestPayload.width = width;
-          falRequestPayload.height = height;
-          console.log(`Adding top-level 'width: ${width}, height: ${height}' to Fal payload.`);
-      } else {
-          console.log(`Warning: Dimensions ${width}x${height} determined, but model '${modelName}' config indicates no support for 'image_size' object or top-level 'width'/'height' parameters.`);
-      }
-
-      // Add aspect_ratio if supported, regardless of whether image_size or width/height were added
-      // (Some APIs might accept both, though redundant)
-      if (aspectRatio && modelConfig.supports_aspect_ratio_param) {
-          falRequestPayload.aspect_ratio = aspectRatio;
-          console.log(`Adding top-level 'aspect_ratio: ${aspectRatio}' to Fal payload.`);
-      }
-
-  } else {
-       console.log(`Skipping size/aspect ratio parameters in Fal payload as dimensions could not be determined.`);
-  }
-
-
-  // --- Call Fal API ---
-  const falSubmitUrl = modelConfig.submit_url;
-  const falStatusBaseUrl = modelConfig.status_base_url;
-  console.log(`Making request to Fal API model ${modelName}. Submit URL: ${falSubmitUrl}`);
-  console.log(`Fal Payload: ${JSON.stringify(falRequestPayload)}`); // Log final payload
-
-  try {
-    const headers = { "Authorization": `Key ${apiKey}`, "Content-Type": "application/json" };
-    const falSubmitResponse = await fetch(falSubmitUrl, { method: 'POST', headers: headers, body: JSON.stringify(falRequestPayload) });
-    const submitResponseText = await falSubmitResponse.text();
-    console.log(`Fal API submit response status: ${falSubmitResponse.status}`);
-    console.log(`Fal API submit response text (first 200 chars): ${submitResponseText.substring(0,200)}`);
-
-    if (falSubmitResponse.status !== Status.OK && falSubmitResponse.status !== Status.Accepted) { // 200 or 202
-      let errorMessage = submitResponseText;
-      try { const errorData = JSON.parse(submitResponseText); errorMessage = errorData.detail || errorData.message || errorData.error?.message || JSON.stringify(errorData); } catch (e) { /* Keep original text */ }
-      console.error(`Fal API submission error: ${falSubmitResponse.status}, ${errorMessage}`);
-      return new Response(JSON.stringify({ error: { message: `Fal API submission error: ${errorMessage}`, type: "fal_api_error", code: falSubmitResponse.status } }), { status: Status.InternalServerError, headers: { 'Content-Type': 'application/json' } });
+    debugLog("--- New Image Generation Request ---");
+    const authResult = extractAndValidateApiKey(request);
+    if (!authResult.valid || !authResult.apiKey) return new Response(JSON.stringify({ error: { message: authResult.error || "Authentication failed.", type: "authentication_error" } }), { status: Status.Unauthorized });
+    const { apiKey } = authResult;
+    let openaiRequestPayload;
+    try { openaiRequestPayload = await request.json(); debugLog("Parsed OpenAI Request Payload:", openaiRequestPayload); }
+    catch (error) { return new Response(JSON.stringify({ error: { message: "Missing or invalid JSON request body.", type: "invalid_request_error" } }), { status: Status.BadRequest }); }
+    
+    const { prompt, model: requestedModel, n: requestedN, size: requestedSize, seed: requestedSeed } = openaiRequestPayload;
+    const modelName = requestedModel || "flux-dev";
+    const numImages = Math.max(1, Math.min(4, parseInt(requestedN) || 1));
+    if (!prompt || typeof prompt !== 'string' || prompt.trim() === "") return new Response(JSON.stringify({ error: { message: "A 'prompt' is required.", type: "invalid_request_error" } }), { status: Status.BadRequest });
+    
+    const modelConfig = await getModelConfig(modelName);
+    if (!modelConfig) return new Response(JSON.stringify({ error: { message: `Model '${modelName}' not found or its configuration failed to load.`, type: "invalid_request_error" } }), { status: Status.NotFound });
+    
+    let width: number | undefined, height: number | undefined, aspectRatio: string | undefined;
+    const requestedDimensions = parseSize(requestedSize);
+    if (requestedDimensions) { width = requestedDimensions.width; height = requestedDimensions.height; aspectRatio = calculateAspectRatio(width, height); }
+    
+    const falRequestPayload: Record<string, any> = { prompt, num_images: numImages, seed: requestedSeed, enable_safety_checker: false };
+    if (width && height) {
+        if (modelConfig.uses_image_size_object) falRequestPayload.image_size = { width, height };
+        else if (modelConfig.supports_size_param) { falRequestPayload.width = width; falRequestPayload.height = height; }
+        if (aspectRatio && modelConfig.supports_aspect_ratio_param) falRequestPayload.aspect_ratio = aspectRatio;
+    } else if (aspectRatio && modelConfig.supports_aspect_ratio_param) {
+        falRequestPayload.aspect_ratio = aspectRatio;
     }
+    debugLog("Constructed Fal Payload:", falRequestPayload);
 
-    const falSubmitData = JSON.parse(submitResponseText);
-    const requestId = falSubmitData.request_id;
-    if (!requestId) {
-      console.error("No request_id found in Fal submission response.", falSubmitData);
-      return new Response(JSON.stringify({ error: { message: "Fal API did not return a request_id.", type: "fal_api_error" } }), { status: Status.InternalServerError, headers: { 'Content-Type': 'application/json' } });
+    try {
+        const falSubmitResponse = await fetch(modelConfig.submit_url, { method: 'POST', headers: { "Authorization": `Key ${apiKey}`, "Content-Type": "application/json" }, body: JSON.stringify(falRequestPayload) });
+        const submitResponseText = await falSubmitResponse.text();
+        debugLog(`Fal Submit Response Status: ${falSubmitResponse.status}`);
+        debugLog("Fal Submit Response Body:", submitResponseText);
+        
+        if (!falSubmitResponse.ok) { let errorMessage = submitResponseText; try { const errorData = JSON.parse(submitResponseText); errorMessage = errorData.detail || JSON.stringify(errorData); } catch (e) { /* ignore */ } return new Response(JSON.stringify({ error: { message: `Fal API submission error: ${errorMessage}`, type: "fal_api_error" } }), { status: Status.InternalServerError }); }
+        
+        const falSubmitData = JSON.parse(submitResponseText);
+        
+        const { status_url, response_url, request_id } = falSubmitData;
+        if (!status_url || !response_url || !request_id) {
+            return new Response(JSON.stringify({ error: { message: "Fal API did not return valid polling URLs.", type: "fal_api_error" } }), { status: Status.InternalServerError });
+        }
+        debugLog(`Received polling URLs. Status: ${status_url}, Result: ${response_url}`);
+
+        const imageUrls: string[] = [];
+        for (let attempt = 0; attempt < 45; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            debugLog(`Polling attempt ${attempt + 1}/45 for request_id: ${request_id}`);
+            
+            const statusResponse = await fetch(status_url, { headers: { "Authorization": `Key ${apiKey}` } });
+            if (statusResponse.ok) {
+                const statusData = await statusResponse.json();
+                if (statusData.status === "COMPLETED") {
+                    const resultResponse = await fetch(response_url, { headers: { "Authorization": `Key ${apiKey}` } });
+                    if (resultResponse.ok) {
+                        const resultData = await resultResponse.json();
+                        debugLog("Received final result data:", resultData);
+                        if (resultData.images && Array.isArray(resultData.images)) resultData.images.forEach((img: any) => { if (img?.url) imageUrls.push(img.url); });
+                        if (imageUrls.length > 0) break;
+                    }
+                } else if (statusData.status === "FAILED" || statusData.status === "ERROR") {
+                    let failureReason = `Polling status indicated ${statusData.status}.`;
+                    try { const resultResponse = await fetch(response_url, { headers: { "Authorization": `Key ${apiKey}` } }); failureReason = await resultResponse.text(); } catch(e) {/* ignore */}
+                    return new Response(JSON.stringify({ error: { message: `Image generation failed: ${failureReason}`, type: "generation_failed" } }), { status: Status.InternalServerError });
+                }
+            }
+        }
+        if (imageUrls.length === 0) return new Response(JSON.stringify({ error: { message: "Image generation timed out or returned no images.", type: "generation_timeout" } }), { status: Status.InternalServerError });
+        const responseData = { created: Math.floor(Date.now() / 1000), data: imageUrls.slice(0, numImages).map(imgUrl => ({ url: imgUrl, revised_prompt: prompt })) };
+        return new Response(JSON.stringify(responseData), { status: Status.OK });
+    } catch (e: any) {
+        console.error(`Unhandled exception in handleImageGenerations: ${e.toString()}`, e.stack);
+        return new Response(JSON.stringify({ error: { message: `Server error: ${e.toString()}`, type: "server_error" } }), { status: Status.InternalServerError });
     }
-    console.log(`Got request_id: ${requestId}`);
-
-    // --- Polling for results (unchanged logic) ---
-    const imageUrls: string[] = [];
-    const maxAttempts = 45; const pollDelay = 2000;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      await new Promise(resolve => setTimeout(resolve, pollDelay));
-      console.log(`Polling attempt ${attempt + 1}/${maxAttempts} for request_id: ${requestId}`);
-      const statusUrl = `${falStatusBaseUrl}/requests/${requestId}/status`; const resultUrl = `${falStatusBaseUrl}/requests/${requestId}`;
-      try {
-        const statusResponse = await fetch(statusUrl, { headers: { "Authorization": `Key ${apiKey}` } });
-        if (statusResponse.ok) {
-          const statusData = await statusResponse.json(); const status = statusData.status;
-          console.log(`Current status: ${status}. Progress: ${statusData.progress ? JSON.stringify(statusData.progress) : 'N/A'}`);
-          if (status === "COMPLETED") {
-            const resultResponse = await fetch(resultUrl, { headers: { "Authorization": `Key ${apiKey}` } });
-            if (resultResponse.ok) {
-              const resultData = await resultResponse.json();
-              // Image extraction logic (adapt as needed)
-              if (resultData.images && Array.isArray(resultData.images)) resultData.images.forEach((img: any) => { if (img?.url) imageUrls.push(img.url); });
-              else if (resultData.image?.url) imageUrls.push(resultData.image.url);
-              else if (resultData.output && Array.isArray(resultData.output)) resultData.output.forEach((item: any) => { if (item?.url && item.content_type?.startsWith('image/')) imageUrls.push(item.url); });
-              else if (Array.isArray(resultData)) resultData.forEach((item: any) => { if (item?.url) imageUrls.push(item.url); });
-
-              if (imageUrls.length >= numImages || imageUrls.length > 0) { console.log("Image generation completed. URLs:", imageUrls); break; }
-              else console.warn("Status COMPLETED, but no image URLs found in expected format. Result data:", JSON.stringify(resultData).substring(0, 500));
-            } else console.warn(`Failed to fetch result for completed request ${requestId}. Status: ${resultResponse.status} ${await resultResponse.text()}`);
-          } else if (status === "FAILED" || status === "ERROR") {
-            let failureReason = `Polling status indicated ${status}.`;
-            try {
-              const resultResponse = await fetch(resultUrl, { headers: { "Authorization": `Key ${apiKey}` } }); const errorText = await resultResponse.text();
-              console.log(`Fetching error details from ${resultUrl}, Status: ${resultResponse.status}, Body: ${errorText.substring(0, 500)}`);
-              if (resultResponse.ok || resultResponse.status === 400) { const errorData = JSON.parse(errorText); failureReason = errorData.detail || errorData.message || errorData.error?.message || errorData.error || JSON.stringify(errorData.logs || errorData); }
-              else failureReason = `Status ${resultResponse.status}: ${errorText}`;
-            } catch (e:any) { console.warn(`Could not fetch or parse detailed failure reason: ${e.message}`); }
-            console.error(`Image generation failed for request_id ${requestId}. Reason: ${failureReason}`);
-            return new Response(JSON.stringify({ error: { message: `Image generation failed: ${failureReason}`, type: "generation_failed" } }), { status: Status.InternalServerError, headers: { 'Content-Type': 'application/json' } });
-          }
-        } else console.warn(`Error checking status for ${requestId}: ${statusResponse.status} ${await statusResponse.text()}`);
-      } catch (e: any) { console.error(`Error during polling for ${requestId}: ${e.toString()}`, e); }
-    } // End polling loop
-
-    if (imageUrls.length === 0) {
-      console.log("No images generated after polling attempts.");
-      return new Response(JSON.stringify({ error: { message: "Unable to generate images or retrieve them after timeout.", type: "generation_timeout_or_error" } }), { status: Status.InternalServerError, headers: { 'Content-Type': 'application/json' } });
-    }
-
-    // --- Format OpenAI Response ---
-    const responseData = { created: Math.floor(Date.now() / 1000), data: imageUrls.slice(0, numImages).map(imgUrl => ({ url: imgUrl, revised_prompt: prompt })) };
-    return new Response(JSON.stringify(responseData), { headers: { 'Content-Type': 'application/json' } });
-
-  } catch (e: any) {
-    console.error(`Unhandled exception in handleImageGenerations: ${e.toString()}`, e.stack);
-    return new Response(JSON.stringify({ error: { message: `Server error: ${e.toString()}`, type: "server_error" } }), { status: Status.InternalServerError, headers: { 'Content-Type': 'application/json' } });
-  }
 }
 
 async function listModels(): Promise<Response> {
-  const modelData = Object.keys(MODEL_URLS).map(id => ({
-    id: id, object: "model", created: Math.floor(Date.now() / 1000) - Math.floor(Math.random() * 3000000),
-    owned_by: "fal-openai-adapter-deno", permission: [], root: id, parent: null
-  }));
-  return new Response(JSON.stringify({ object: "list", data: modelData }), { headers: { 'Content-Type': 'application/json' } });
+    const modelData = Array.from(SUPPORTED_MODELS_MAP.keys()).map(id => ({ id, object: "model", created: Math.floor(Date.now() / 1000) - Math.floor(Math.random() * 3000000), owned_by: "fal-openai-adapter-deno", permission: [], root: id, parent: null }));
+    return new Response(JSON.stringify({ object: "list", data: modelData }));
 }
 
+// --- Main Server Logic ---
+async function warmupCache() {
+    console.log("Starting model cache warm-up...");
+    await Promise.all(
+      Array.from(SUPPORTED_MODELS_MAP.keys()).map(name => 
+        getModelConfig(name).catch(e => { console.error(`[Warm-up] Failed for ${name}:`, e.message); return null; })
+      )
+    );
+    console.log("Model cache warm-up finished.");
+}
 
-// --- Main Server Logic (added /health endpoint) ---
-console.log(`Deno server starting on http://localhost:${PORT}`);
-Deno.serve({ port: PORT }, async (request: Request) => {
-  const url = new URL(request.url); const path = url.pathname;
-  const startTime = Date.now();
-  console.log(`[${new Date(startTime).toISOString()}] --> ${request.method} ${path}`);
-  let response: Response;
-  try {
-      if (path === '/v1/images/generations' && request.method === 'POST') response = await handleImageGenerations(request);
-      else if (path === '/v1/models' && request.method === 'GET') response = await listModels();
-      else if (path === '/health' && request.method === 'GET') response = new Response(JSON.stringify({ status: "ok" }), { status: Status.OK, headers: { 'Content-Type': 'application/json' } });
-      else response = new Response(JSON.stringify({ error: { message: "Not Found. Available endpoints: POST /v1/images/generations, GET /v1/models, GET /health", type: "not_found_error" } }), { status: Status.NotFound, headers: { 'Content-Type': 'application/json' } });
-  } catch (err) {
-      console.error(`[${new Date().toISOString()}] Critical error handling ${request.method} ${path}:`, err);
-      response = new Response(JSON.stringify({ error: { message: "Internal Server Error", type: "internal_server_error" } }), { status: Status.InternalServerError, headers: { 'Content-Type': 'application/json' } });
-  }
-  const duration = Date.now() - startTime;
-  console.log(`[${new Date().toISOString()}] <-- ${request.method} ${path} ${response.status} (${duration}ms)`);
-  return response;
+warmupCache().then(() => {
+    console.log(`Deno server starting to listen on http://localhost:${PORT}`);
+    Deno.serve({ port: PORT }, async (request: Request) => {
+        const url = new URL(request.url);
+        const path = url.pathname;
+        const startTime = Date.now();
+        if (request.method === 'OPTIONS') {
+            console.log(`[CORS] Handling OPTIONS preflight for ${path}`);
+            return new Response(null, { status: Status.NoContent, headers: CORS_HEADERS });
+        }
+        console.log(`[${new Date(startTime).toISOString()}] --> ${request.method} ${path}`);
+        let response: Response;
+        try {
+            if (path === '/v1/images/generations' && request.method === 'POST') response = await handleImageGenerations(request);
+            else if (path === '/v1/models' && request.method === 'GET') response = await listModels();
+            else if (path === '/health' && request.method === 'GET') response = new Response(JSON.stringify({ status: "ok" }));
+            else response = new Response(JSON.stringify({ error: { message: "Not Found" } }), { status: Status.NotFound });
+        } catch (err) {
+            console.error(`[${new Date().toISOString()}] Critical error handling ${request.method} ${path}:`, err);
+            response = new Response(JSON.stringify({ error: { message: "Internal Server Error" } }), { status: Status.InternalServerError });
+        }
+        for (const [key, value] of Object.entries(CORS_HEADERS)) { response.headers.set(key, value); }
+        if (!response.headers.has('Content-Type') && response.body) response.headers.set('Content-Type', 'application/json');
+        const duration = Date.now() - startTime;
+        console.log(`[${new Date().toISOString()}] <-- ${request.method} ${path} ${response.status} (${duration}ms)`);
+        return response;
+    });
 });
