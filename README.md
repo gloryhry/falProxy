@@ -2,6 +2,8 @@
 
 > A high-performance Deno proxy that makes Fal.ai's powerful models available through the standard OpenAI `/v1/images/generations` API.
 
+[中文版](README-zh.md)
+
 [![Deno](https://img.shields.io/badge/Deno-000000?style=for-the-badge&logo=deno&logoColor=white)](https://deno.land/)
 [![OpenAI](https://img.shields.io/badge/OpenAI-Compatible-00A67E?style=for-the-badge&logo=openai&logoColor=white)](https://openai.com/)
 [![Fal.ai](https://img.shields.io/badge/Fal.ai-Powered-FF6B35?style=for-the-badge)](https://fal.ai/)

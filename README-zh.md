@@ -2,6 +2,8 @@
 
 > 一个高性能的 Deno 代理服务，旨在无缝桥接 OpenAI 的图像生成 API 与 Fal.ai 强大的 AI 模型。
 
+[English Version](README.md)
+
 [![Deno](https://img.shields.io/badge/Deno-000000?style=for-the-badge&logo=deno&logoColor=white)](https://deno.land/)
 [![OpenAI](https://img.shields.io/badge/OpenAI-Compatible-00A67E?style=for-the-badge&logo=openai&logoColor=white)](https://openai.com/)
 [![Fal.ai](https://img.shields.io/badge/Fal.ai-Powered-FF6B35?style=for-the-badge)](https://fal.ai/)
