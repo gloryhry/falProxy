@@ -7,10 +7,6 @@ ARG PORT=8000
 # 设置工作目录
 WORKDIR /app
 
-# 复制依赖文件（先复制配置文件以优化缓存层）
-COPY .env.example ./
-COPY CLAUDE.md ./ 2>/dev/null || true
-
 # 复制源代码
 COPY router.ts .
 COPY web-tester.ts ./ 2>/dev/null || true
