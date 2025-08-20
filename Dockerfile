@@ -9,7 +9,7 @@ WORKDIR /app
 
 # 复制源代码
 COPY router.ts .
-COPY web-tester.ts ./ 2>/dev/null || true
+COPY web-tester.ts .
 
 # 缓存依赖项（如果Deno有依赖文件的话）
 # RUN deno cache router.ts
