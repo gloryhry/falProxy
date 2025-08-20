@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  fal-proxy:
+    build: .
+    container_name: fal-proxy
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"
+    environment:
+      - CUSTOM_ACCESS_KEY=${CUSTOM_ACCESS_KEY}
+      - AI_KEYS=${AI_KEYS}
+      - SUPPORTED_MODELS=${SUPPORTED_MODELS}
+      - PORT=${PORT:-8000}
+      - DEBUG_MODE=${DEBUG_MODE:-false}
+    # 生产环境推荐不直接挂载.env文件，而是通过环境变量传递
+    # env_file:
+    #   - .env
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${PORT:-8000}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # 资源限制（可根据需要调整）
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    # 网络配置
+    networks:
+      - fal-proxy-network
+    # 安全配置
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
+# 网络配置
+networks:
+  fal-proxy-network:
+    driver: bridge

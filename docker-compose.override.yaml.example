@@ -1,0 +1,40 @@
+# docker-compose.override.yaml.example - 开发环境配置示例文件
+# 复制此文件为 docker-compose.override.yaml 以启用开发环境配置
+
+version: '3.8'
+
+services:
+  fal-proxy:
+    # 开发环境特定配置
+    volumes:
+      # 挂载源代码以支持热重载（如果Deno支持）
+      - .:/app
+      # 挂载.env文件（如果在本地开发）
+      - .env:/app/.env
+    environment:
+      # 开发环境推荐值
+      - DEBUG_MODE=true
+    # 覆盖健康检查以适应开发环境
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${PORT:-8000}/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Web测试器服务 - 仅用于开发环境
+  web-tester:
+    build: .
+    container_name: fal-proxy-web-tester
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+    volumes:
+      - .:/app
+    command: ["deno", "run", "--allow-net", "web-tester.ts"]
+    restart: always
+    depends_on:
+      - fal-proxy
+    networks:
+      - fal-proxy-network

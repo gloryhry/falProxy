@@ -45,11 +45,35 @@ SUPPORTED_MODELS="flux-dev:fal-ai/flux/dev,sdxl:fal-ai/stable-diffusion-xl,flux-
 ```
 
 #### 3. 启动服务
+
+##### 方法1：直接运行（推荐用于开发）
 使用 Deno 启动脚本，并授予必要的权限。
 ```bash
 deno run --allow-net --allow-read=.env --allow-env router.ts
 ```
 服务启动后，将自动加载所有模型配置，并准备好接收 API 请求。
+
+##### 方法2：使用Docker（推荐用于生产环境）
+项目提供了Docker支持，可以更方便地部署和管理。
+
+1. 首先复制环境配置文件：
+```bash
+cp .env.example .env
+```
+
+2. 编辑 `.env` 文件，填入你的实际配置值
+
+3. 使用Docker Compose启动服务：
+```bash
+# 生产环境部署
+docker-compose up -d
+
+# 开发环境部署（包含Web测试器）
+cp docker-compose.override.yaml.example docker-compose.override.yaml
+docker-compose up -d
+```
+
+服务将在配置的端口上运行，并包含健康检查和自动重启功能。
 
 ## 🎯 API 使用说明
 
