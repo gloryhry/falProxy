@@ -17,7 +17,7 @@ services:
     #   - .env
     restart: always
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${PORT:-8000}/health"]
+      test: ["CMD", "deno", "eval", "const port = Deno.env.get('PORT') || '8000'; fetch('http://localhost:' + port + '/health').then(res => res.ok ? 0 : 1).catch(() => 1)"]
       interval: 30s
       timeout: 10s
       retries: 3

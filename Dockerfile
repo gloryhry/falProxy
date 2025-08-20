@@ -1,6 +1,9 @@
 # 使用最小的Deno基础镜像
 FROM denoland/deno:alpine AS base
 
+# 定义端口参数，默认为8000
+ARG PORT=8000
+
 # 设置工作目录
 WORKDIR /app
 
@@ -19,11 +22,11 @@ COPY web-tester.ts ./ 2>/dev/null || true
 USER deno
 
 # 暴露端口
-EXPOSE 8000
+EXPOSE ${PORT}
 
-# 健康检查
+# 健康检查 - 使用Deno内置的fetch而不是curl
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8000/health || exit 1
+  CMD deno eval "const port = Deno.env.get('PORT') || '8000'; fetch('http://localhost:' + port + '/health').then(res => res.ok ? 0 : 1).catch(() => 1)" || exit 1
 
 # 启动命令
 CMD ["deno", "run", "--allow-net", "--allow-read=.env", "--allow-env", "router.ts"]

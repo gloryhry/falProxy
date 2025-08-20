@@ -75,6 +75,64 @@ docker-compose up -d
 
 服务将在配置的端口上运行，并包含健康检查和自动重启功能。
 
+##### Docker自动化构建
+本项目配置了GitHub Actions工作流，用于自动构建和推送到GitHub Container Registry (GHCR)。
+
+###### 工作流特性
+- **触发条件**：每当代码推送到`main`分支时自动触发
+- **多平台支持**：构建支持linux/amd64和linux/arm64架构的镜像
+- **版本管理**：使用日期格式版本（YYYY-MM-DD格式）
+- **标签策略**：自动更新`latest`标签指向最新构建
+- **目标Registry**：GitHub Container Registry (ghcr.io)
+
+###### 镜像标签
+构建的Docker镜像将被推送并标记为：
+- `latest` - 指向最新的构建
+- `YYYY-MM-DD`格式的日期标签 - 例如`2025-08-20`
+
+###### 拉取镜像
+你可以从GHCR拉取镜像（将 `YOUR_GITHUB_USERNAME` 替换为你的实际GitHub用户名）：
+```bash
+# 拉取最新版本
+docker pull ghcr.io/YOUR_GITHUB_USERNAME/falproxy:latest
+
+# 拉取特定日期版本
+docker pull ghcr.io/YOUR_GITHUB_USERNAME/falproxy:2025-08-20
+```
+
+###### 构建配置
+- 不使用Docker层缓存
+- 使用GitHub Actions默认超时设置
+- 无特殊通知机制
+- 无并行构建
+
+构建仅在生产环境中进行，确保代码质量和稳定性。
+
+##### Docker故障排除
+
+如果遇到问题，请检查以下几点：
+
+1. **端口冲突**：确保配置的端口没有被其他服务占用
+   ```bash
+   # 检查端口占用情况
+   netstat -tulpn | grep :8000
+   ```
+
+2. **权限问题**：确保Docker有权限访问项目目录和.env文件
+
+3. **健康检查失败**：
+   - 检查容器日志：`docker logs fal-proxy`
+   - 确认环境变量配置正确
+   - 验证Fal.ai API密钥有效
+
+4. **构建问题**：
+   - 清理Docker缓存：`docker builder prune`
+   - 重新构建镜像：`docker-compose build --no-cache`
+
+5. **容器无法启动**：
+   - 检查环境变量是否正确设置
+   - 确认.env文件格式正确（无多余的空格或特殊字符）
+
 ## 🎯 Usage (API Endpoints)
 
 ### Generating an Image
@@ -108,3 +166,43 @@ All configuration is managed via the `.env` file.
 | `SUPPORTED_MODELS`  | **Required.** A comma-separated list defining the models to expose. The format is `your-model-name:fal-ai/endpoint/id`.                   | `"sdxl:fal-ai/stable-diffusion-xl,flux:fal-ai/flux/dev"`                                   |
 | `PORT`              | *Optional.* The port for the proxy server to listen on.                                                                                  | `8000` (default)                                                                           |
 | `DEBUG_MODE`        | *Optional.* Set to `true` to enable verbose logging of requests, payloads, and schema parsing, which is useful for troubleshooting.       | `true`                                                                                     |
+
+### Docker环境变量配置
+
+当使用Docker部署时，可以通过以下方式配置环境变量：
+
+1. **通过.env文件**（推荐）：
+   ```bash
+   # 复制示例配置
+   cp .env.example .env
+   # 编辑.env文件填入实际值
+   ```
+
+2. **通过docker-compose.yaml中的environment字段**：
+   ```yaml
+   environment:
+     - CUSTOM_ACCESS_KEY=your-custom-key
+     - AI_KEYS=your-fal-ai-keys
+     - SUPPORTED_MODELS=model1:fal-ai/model1,model2:fal-ai/model2
+   ```
+
+3. **通过命令行**：
+   ```bash
+   CUSTOM_ACCESS_KEY=your-key AI_KEYS=your-keys docker-compose up -d
+   ```
+
+### 安全配置建议
+
+1. **文件权限**：设置.env文件权限为600以防止未授权访问
+   ```bash
+   chmod 600 .env
+   ```
+
+2. **密钥轮换**：定期更换CUSTOM_ACCESS_KEY和AI_KEYS
+
+3. **网络隔离**：在生产环境中使用防火墙限制对代理端口的访问
+
+4. **Docker安全**：
+   - 不要将敏感文件添加到Docker镜像中
+   - 使用.dockerignore文件排除不必要的文件
+   - 使用只读文件系统和临时文件系统增强容器安全性
